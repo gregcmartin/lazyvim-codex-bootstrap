@@ -18,12 +18,57 @@ LAUNCHER_SCRIPT="$LOCAL_BIN_DIR/lazyvim-codex"
 GHOSTTY_CONFIG_FILE="${GHOSTTY_CONFIG_FILE:-$HOME/.config/ghostty/config}"
 TMUX_CONFIG_DIR="${TMUX_CONFIG_DIR:-$HOME/.config/tmux}"
 TMUX_SNIPPET_FILE="$TMUX_CONFIG_DIR/lazyvim-codex.conf"
+DETECTED_GHOSTTY_PATH=""
 
 info() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
 error() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+detect_ghostty_path() {
+  if [ -n "${DETECTED_GHOSTTY_PATH:-}" ] && [ -x "$DETECTED_GHOSTTY_PATH" ]; then
+    printf '%s\n' "$DETECTED_GHOSTTY_PATH"
+    return 0
+  fi
+
+  if command_exists ghostty; then
+    DETECTED_GHOSTTY_PATH="$(command -v ghostty)"
+    printf '%s\n' "$DETECTED_GHOSTTY_PATH"
+    return 0
+  fi
+
+  local candidates=(
+    "/Applications/Ghostty.app/Contents/MacOS/ghostty"
+    "$HOME/Applications/Ghostty.app/Contents/MacOS/ghostty"
+  )
+
+  if command_exists brew; then
+    local brew_prefix
+    brew_prefix="$(brew --prefix 2>/dev/null || true)"
+    if [ -n "$brew_prefix" ]; then
+      candidates+=("$brew_prefix/bin/ghostty" "$brew_prefix/opt/ghostty/bin/ghostty")
+      local cask_root="$brew_prefix/Caskroom/ghostty"
+      if [ -d "$cask_root" ]; then
+        local path
+        while IFS= read -r -d '' path; do
+          candidates+=("$path")
+        done < <(find "$cask_root" -type f -path "*/Ghostty.app/Contents/MacOS/ghostty" -print0 2>/dev/null || true)
+      fi
+    fi
+  fi
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [ -x "$candidate" ]; then
+      DETECTED_GHOSTTY_PATH="$candidate"
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
 
 require_command() {
   local cmd="$1"
@@ -282,6 +327,7 @@ create_launcher_script() {
 
   local workdir="$LAZYVIM_CODEX_WORKDIR"
   ensure_dir "$workdir"
+  local ghostty_path="${DETECTED_GHOSTTY_PATH:-ghostty}"
 
   info "Creating launcher script at $LAUNCHER_SCRIPT"
   cat >"$LAUNCHER_SCRIPT" <<EOF
@@ -309,8 +355,17 @@ if ! tmux has-session -t "\$SESSION" 2>/dev/null; then
   fi
 fi
 
-if command -v ghostty >/dev/null 2>&1; then
-  exec ghostty --command "tmux attach-session -t \$SESSION"
+GHOSTTY_BIN="$ghostty_path"
+if [ ! -x "\$GHOSTTY_BIN" ]; then
+  if command -v ghostty >/dev/null 2>&1; then
+    GHOSTTY_BIN="$(command -v ghostty)"
+  else
+    GHOSTTY_BIN=""
+  fi
+fi
+
+if [ -n "\$GHOSTTY_BIN" ]; then
+  exec "\$GHOSTTY_BIN" --command "tmux attach-session -t \$SESSION"
 else
   exec tmux attach-session -t "\$SESSION"
 fi
@@ -588,7 +643,7 @@ install_ghostty() {
     linux) install_ghostty_linux ;;
   esac
 
-  if ! command_exists ghostty; then
+  if ! detect_ghostty_path >/dev/null; then
     return 1
   fi
 
@@ -598,13 +653,11 @@ install_ghostty() {
 configure_default_terminal() {
   local shell_rc_override="$1"
 
-  if ! command_exists ghostty; then
-    warn "Ghostty command not found; cannot set as default terminal."
-    return 1
-  fi
-
   local ghostty_path
-  ghostty_path="$(command -v ghostty)"
+  ghostty_path="$(detect_ghostty_path)" || {
+    warn "Ghostty binary not found; cannot set as default terminal."
+    return 1
+  }
 
   export TERMINAL="$ghostty_path"
   export DEFAULT_TERMINAL="$ghostty_path"
@@ -794,8 +847,13 @@ EOF
 }
 
 auto_launch_lazyvim_codex() {
-  if ! command_exists ghostty; then
+  local ghostty_path
+  ghostty_path="$(detect_ghostty_path)" || {
     error "Ghostty is required for automatic launch but was not detected."
+  }
+
+  if [ ! -x "$ghostty_path" ]; then
+    error "Resolved Ghostty binary at $ghostty_path is not executable."
   fi
 
   if [ ! -x "$LAUNCHER_SCRIPT" ]; then
@@ -883,7 +941,7 @@ main() {
   setup_tmux_configuration
   create_launcher_script
 
-  if command_exists ghostty; then
+  if detect_ghostty_path >/dev/null; then
     setup_ghostty_theme
   fi
 
