@@ -51,9 +51,13 @@ detect_ghostty_path() {
       local cask_root="$brew_prefix/Caskroom/ghostty"
       if [ -d "$cask_root" ]; then
         local path
-        while IFS= read -r -d '' path; do
-          candidates+=("$path")
-        done < <(find "$cask_root" -type f -path "*/Ghostty.app/Contents/MacOS/ghostty" -print0 2>/dev/null || true)
+        while IFS= read -r path; do
+          if [ -n "$path" ]; then
+            candidates+=("$path")
+          fi
+        done <<EOF
+$(find "$cask_root" -type f -path "*/Ghostty.app/Contents/MacOS/ghostty" -print 2>/dev/null || true)
+EOF
       fi
     fi
   fi
@@ -66,6 +70,29 @@ detect_ghostty_path() {
       return 0
     fi
   done
+
+  return 1
+}
+
+ghostty_theme_exists() {
+  local theme="$1"
+  local ghostty_bin
+  ghostty_bin="$(detect_ghostty_path)" || return 1
+
+  if "$ghostty_bin" +list-themes 2>/dev/null | awk -F' (' '{print $1}' | grep -Fx "$theme" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local user_theme="$HOME/.config/ghostty/themes/$theme"
+  if [ -f "$user_theme" ]; then
+    return 0
+  fi
+
+  local theme_dir
+  theme_dir="$(cd "$(dirname "$ghostty_bin")/../Resources/ghostty/themes" 2>/dev/null && pwd || true)"
+  if [ -n "$theme_dir" ] && [ -f "$theme_dir/$theme" ]; then
+    return 0
+  fi
 
   return 1
 }
@@ -268,24 +295,50 @@ setup_ghostty_theme() {
   ensure_dir "$(dirname "$config_file")"
 
   if [ -f "$config_file" ] && grep -Fq "lazyvim-codex bootstrap theme" "$config_file"; then
-    info "Ghostty config already contains lazyvim-codex theme block."
+    info "Removing legacy Ghostty theme block inserted by a previous bootstrap run."
+    local temp_file
+    temp_file="$(mktemp)"
+    awk '
+      skip > 0 { skip--; next }
+      /# lazyvim-codex bootstrap theme/ { skip = 3; next }
+      { print }
+    ' "$config_file" >"$temp_file"
+    mv "$temp_file" "$config_file"
+  fi
+
+  if [ -f "$config_file" ] && grep -Fq "lazyvim-codex bootstrap preferences" "$config_file"; then
+    info "Ghostty config already contains lazyvim-codex preferences block."
     return
   fi
 
-  info "Applying dark appearance settings to Ghostty."
+  local theme_name="Catppuccin Mocha"
+  local theme_line=""
+  if ghostty_theme_exists "$theme_name"; then
+    theme_line="theme = \"$theme_name\""
+  else
+    warn "Ghostty theme \"$theme_name\" not found; leaving theme unchanged."
+    theme_line="# theme = \"$theme_name\""
+  fi
+
+  info "Adding Ghostty appearance hints to $config_file."
   {
-    printf '\n# lazyvim-codex bootstrap theme (%s)\n' "$(date)"
-    echo 'appearance = "dark"'
-    echo '# Adjust the theme name if you prefer a different palette.'
-    echo 'theme = "catppuccin-mocha"'
+    printf '\n# lazyvim-codex bootstrap preferences (%s)\n' "$(date)"
+    echo '# Adjust these values as desired.'
+    echo '# macos-appearance = "dark"'
+    echo "$theme_line"
   } >>"$config_file"
 }
 
 setup_tmux_configuration() {
   ensure_dir "$TMUX_CONFIG_DIR"
 
-  if [ ! -f "$TMUX_SNIPPET_FILE" ]; then
-    info "Creating tmux configuration snippet at $TMUX_SNIPPET_FILE"
+  local snippet_needs_update=1
+  if [ -f "$TMUX_SNIPPET_FILE" ] && grep -Fq "--dangerously-bypass-approvals-and-sandbox" "$TMUX_SNIPPET_FILE"; then
+    snippet_needs_update=0
+  fi
+
+  if [ "$snippet_needs_update" -eq 1 ]; then
+    info "Writing tmux configuration snippet at $TMUX_SNIPPET_FILE"
     cat >"$TMUX_SNIPPET_FILE" <<'EOF'
 # lazyvim-codex bootstrap defaults
 set -g default-terminal "xterm-256color"
@@ -297,8 +350,8 @@ set -g pane-border-style fg=colour238
 set -g pane-active-border-style fg=colour111
 
 # Quick access for Codex command panes
-bind-key -n M-c run-shell 'tmux new-window -n codex "codex"'
-bind-key -n M-s run-shell 'tmux split-window -v "codex"'
+bind-key -n M-c run-shell 'tmux new-window -n codex "codex --full-access --dangerously-bypass-approvals-and-sandbox"'
+bind-key -n M-s run-shell 'tmux split-window -v "codex --full-access --dangerously-bypass-approvals-and-sandbox"'
 EOF
   else
     info "tmux configuration snippet already present at $TMUX_SNIPPET_FILE."
@@ -327,7 +380,13 @@ create_launcher_script() {
 
   local workdir="$LAZYVIM_CODEX_WORKDIR"
   ensure_dir "$workdir"
-  local ghostty_path="${DETECTED_GHOSTTY_PATH:-ghostty}"
+  local ghostty_path="${DETECTED_GHOSTTY_PATH:-}"
+  if [ -z "$ghostty_path" ]; then
+    ghostty_path="$(detect_ghostty_path 2>/dev/null || true)"
+  fi
+  if [ -z "$ghostty_path" ]; then
+    ghostty_path="ghostty"
+  fi
 
   info "Creating launcher script at $LAUNCHER_SCRIPT"
   cat >"$LAUNCHER_SCRIPT" <<EOF
@@ -350,7 +409,7 @@ if ! tmux has-session -t "\$SESSION" 2>/dev/null; then
   tmux new-session -d -s "\$SESSION" -c "\$WORKDIR" "cd \"\$WORKDIR\" && nvim"
   tmux rename-window -t "\$SESSION:0" editor
   if command -v codex >/dev/null 2>&1; then
-    tmux split-window -v -t "\$SESSION:0" -c "\$WORKDIR" "cd \"\$WORKDIR\" && codex"
+    tmux split-window -v -t "\$SESSION:0" -c "\$WORKDIR" "cd \"\$WORKDIR\" && codex --full-access --dangerously-bypass-approvals-and-sandbox"
     tmux select-pane -t "\$SESSION:0.0"
   fi
 fi
@@ -365,7 +424,7 @@ if [ ! -x "\$GHOSTTY_BIN" ]; then
 fi
 
 if [ -n "\$GHOSTTY_BIN" ]; then
-  exec "\$GHOSTTY_BIN" --command "tmux attach-session -t \$SESSION"
+  exec "\$GHOSTTY_BIN" --command="tmux attach-session -t \$SESSION"
 else
   exec tmux attach-session -t "\$SESSION"
 fi
@@ -378,12 +437,17 @@ setup_codex_agent_notes() {
   local agents_file="$LAZYVIM_CODEX_WORKDIR/AGENTS.md"
   ensure_dir "$LAZYVIM_CODEX_WORKDIR"
 
-  if [ -f "$agents_file" ]; then
-    info "AGENTS.md already present at $agents_file"
+  local agents_needs_update=1
+  if [ -f "$agents_file" ] && grep -Fq "--dangerously-bypass-approvals-and-sandbox" "$agents_file"; then
+    agents_needs_update=0
+  fi
+
+  if [ "$agents_needs_update" -eq 0 ]; then
+    info "AGENTS.md already contains updated Codex guidance."
     return
   fi
 
-  info "Creating Codex agent guidance at $agents_file"
+  info "Writing Codex agent guidance at $agents_file"
   cat >"$agents_file" <<'EOF'
 # LazyVim Codex Workspace Guidelines
 
@@ -392,7 +456,7 @@ setup_codex_agent_notes() {
 - For one-off tasks, prefer `tmux split-window -v` so output stays visible.
 - Use the environment variable `CODEX_TMUX_SESSION` if you need to reference the current session.
 - Keep the top pane focused on Neovim; reserve other panes/windows for auxiliary commands.
-- Alt+c opens a new tmux window running `codex`; Alt+s opens a vertical split with `codex`.
+- Alt+c opens a new tmux window running `codex --full-access --dangerously-bypass-approvals-and-sandbox`; Alt+s opens a vertical split with the same flags.
 EOF
 }
 
