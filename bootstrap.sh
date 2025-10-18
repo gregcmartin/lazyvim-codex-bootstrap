@@ -98,6 +98,7 @@ ensure_dir() {
 }
 
 ensure_tmux_session() {
+  local auto_launch=1
   local disable_tmux=0
   local tmux_child=0
 
@@ -106,8 +107,13 @@ ensure_tmux_session() {
       --no-tmux) disable_tmux=1 ;;
       --help|-h) disable_tmux=1 ;;
       --tmux-child) tmux_child=1 ;;
+      --no-auto-launch) auto_launch=0 ;;
     esac
   done
+
+  if [ "$auto_launch" -eq 1 ]; then
+    return 0
+  fi
 
   if [ -n "${TMUX:-}" ]; then
     tmux_child=1
@@ -797,7 +803,12 @@ auto_launch_lazyvim_codex() {
   fi
 
   info "Launching LazyVim Codex environment..."
-  exec "$LAUNCHER_SCRIPT"
+  if ! "$LAUNCHER_SCRIPT"; then
+    warn "Launcher exited with a non-zero status; you may need to run it manually."
+    return 1
+  fi
+
+  return 0
 }
 
 wait_for_tmux_exit() {
@@ -903,7 +914,9 @@ main() {
 
   print_next_steps "$api_key_status" "$sync_status" "$ghostty_status" "$tmux_status" "$LAUNCHER_SCRIPT"
   if [ "$auto_launch" -eq 1 ]; then
-    auto_launch_lazyvim_codex
+    if ! auto_launch_lazyvim_codex; then
+      auto_launch=0
+    fi
   fi
   wait_for_tmux_exit
 }
