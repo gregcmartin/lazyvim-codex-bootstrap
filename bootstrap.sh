@@ -40,6 +40,7 @@ Options:
   --shell-rc=PATH         Persist the API key in the specified shell rc file.
   --skip-headless-sync    Skip running Neovim headless Lazy sync (runs by default).
   --no-tmux               Run without wrapping the process in tmux.
+  --no-auto-launch        Skip launching LazyVim Codex after setup completes.
   --help                  Show this help message.
 
 Environment:
@@ -580,6 +581,12 @@ install_ghostty() {
     macos) install_ghostty_macos ;;
     linux) install_ghostty_linux ;;
   esac
+
+  if ! command_exists ghostty; then
+    return 1
+  fi
+
+  return 0
 }
 
 configure_default_terminal() {
@@ -780,6 +787,19 @@ EOF
   printf -- "- Launch \`nvim\` directly anytime to reuse the configured LazyVim setup.\n"
 }
 
+auto_launch_lazyvim_codex() {
+  if ! command_exists ghostty; then
+    error "Ghostty is required for automatic launch but was not detected."
+  fi
+
+  if [ ! -x "$LAUNCHER_SCRIPT" ]; then
+    error "Launcher script at $LAUNCHER_SCRIPT is missing or not executable."
+  fi
+
+  info "Launching LazyVim Codex environment..."
+  exec "$LAUNCHER_SCRIPT"
+}
+
 wait_for_tmux_exit() {
   if [ -n "${LAZYVIM_CODEX_TMUX_CHILD:-}" ] && [ -t 0 ]; then
     printf '\nPress Enter to close this tmux session...'
@@ -795,6 +815,7 @@ main() {
   local run_headless_sync=1
   local ghostty_status="yes"
   local tmux_status="yes"
+  local auto_launch=1
 
   if [ -z "${LAZYVIM_CODEX_TMUX_CHILD:-}" ]; then
     tmux_status="no"
@@ -821,6 +842,9 @@ main() {
         ;;
       --no-tmux)
         ;;
+      --no-auto-launch)
+        auto_launch=0
+        ;;
       --tmux-child)
         ;;
       --help)
@@ -836,7 +860,7 @@ main() {
 
   install_dependencies
   if ! install_ghostty; then
-    ghostty_status="no"
+    error "Ghostty installation failed. Install Ghostty manually and re-run the bootstrap."
   fi
 
   install_codex_cli
@@ -878,6 +902,9 @@ main() {
   fi
 
   print_next_steps "$api_key_status" "$sync_status" "$ghostty_status" "$tmux_status" "$LAUNCHER_SCRIPT"
+  if [ "$auto_launch" -eq 1 ]; then
+    auto_launch_lazyvim_codex
+  fi
   wait_for_tmux_exit
 }
 
